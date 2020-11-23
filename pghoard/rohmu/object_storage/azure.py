@@ -8,16 +8,17 @@ import time
 
 # pylint: disable=import-error, no-name-in-module
 import azure.common
-from azure.storage.blob import BlockBlobService, ContentSettings
-from azure.storage.blob.models import BlobPrefix
+from azure.core.exceptions import ResourceExistsError
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.storage.blob._models import BlobPrefix
 
 from ..errors import (FileNotFoundFromStorageError, InvalidConfigurationError, StorageError)
 from .base import (KEY_TYPE_OBJECT, KEY_TYPE_PREFIX, BaseTransfer, IterKeyItem, get_total_memory)
 
 ENDPOINT_SUFFIXES = {
-    None: None,  # use default
+    None: "core.windows.net",
     "germany": "core.cloudapi.de",  # Azure Germany is a completely separate cloud from the regular Azure Public cloud
-    "public": None,  # use default
+    "public": "core.windows.net"
 }
 
 
@@ -31,7 +32,7 @@ def calculate_max_block_size():
 # files. Default block size is set to 4 MiB so only ~200 GB files can be uploaded. In order to get close
 # to that 5 TiB increase the block size based on host memory; we don't want to use the max 100 for all
 # hosts because the uploader will allocate (with default settings) 3 x block size of memory.
-BlockBlobService.MAX_BLOCK_SIZE = calculate_max_block_size()
+MAX_BLOCK_SIZE = calculate_max_block_size()
 
 
 class AzureTransfer(BaseTransfer):
@@ -46,8 +47,14 @@ class AzureTransfer(BaseTransfer):
         except KeyError:
             raise InvalidConfigurationError("Unknown azure cloud {!r}".format(azure_cloud))
 
-        self.conn = BlockBlobService(
-            account_name=self.account_name, account_key=self.account_key, endpoint_suffix=endpoint_suffix
+        conn_str = ("DefaultEndpointsProtocol=https;"
+            f"AccountName={self.account_name};"
+            f"AccountKey={self.account_key};"
+            f"EndpointSuffix={endpoint_suffix}"
+        )
+        self.conn = BlobServiceClient.from_connection_string(
+            conn_str=conn_str,
+            max_block_size=MAX_BLOCK_SIZE,
         )
         self.conn.socket_timeout = 120  # Default Azure socket timeout 20s is a bit short
         self.container = self.get_or_create_container(self.container_name)
@@ -134,8 +141,12 @@ class AzureTransfer(BaseTransfer):
         key = self.format_key_for_backend(key, remove_slash_prefix=True)
         self.log.debug("Deleting key: %r", key)
         try:
-            return self.conn.delete_blob(self.container_name, key)
-        except azure.common.AzureMissingResourceHttpError as ex:  # pylint: disable=no-member
+            blob_client = self.conn.get_blob_client(container=self.container_name, blob=key)
+            return blob_client.delete_blob()
+        except (
+            azure.common.AzureMissingResourceHttpError,
+            azure.core.exceptions.ResourceNotFoundError
+        ) as ex:  # pylint: disable=no-member
             raise FileNotFoundFromStorageError(key) from ex
 
     def get_contents_to_file(self, key, filepath_to_store_to, *, progress_callback=None):
@@ -286,6 +297,9 @@ class AzureTransfer(BaseTransfer):
 
     def get_or_create_container(self, container_name):
         start_time = time.monotonic()
-        self.conn.create_container(container_name)
+        try:
+            self.conn.create_container(container_name)
+        except ResourceExistsError:
+            pass  # This was handled by azure-storagepython, with azure-sdk we need to do it ourselves
         self.log.debug("Got/Created container: %r successfully, took: %.3fs", container_name, time.monotonic() - start_time)
         return container_name
