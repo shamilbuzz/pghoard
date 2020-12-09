@@ -10,9 +10,9 @@ from threading import Thread
 import ctypes
 import logging
 import os
+import platform
 import select
 import struct
-
 
 class InotifyEvent(ctypes.Structure):
     _fields_ = [
@@ -55,7 +55,7 @@ class InotifyWatcher(Thread):
         super().__init__()
         # use the newer form for future-proofness
         self.log = logging.getLogger("PGHoardInotify")
-        self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        self.libc = ctypes.CDLL("libc.{}".format("so.6" if platform.uname()[0] != "Darwin" else "dylib"), use_errno=True)
         self.fd = self.libc.inotify_init()
         self.watch_to_path = {}
         self.cookies = {}
