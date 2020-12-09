@@ -220,7 +220,7 @@ def extract_pghoard_bb_v2_metadata(fileobj):
 
 
 def get_pg_wal_directory(config):
-    if config["pg_data_directory_version"] in ("10", "11"):
+    if config["pg_data_directory_version"] in ("10", "11", "12", "13"):
         return os.path.join(config["pg_data_directory"], "pg_wal")
     return os.path.join(config["pg_data_directory"], "pg_xlog")
 

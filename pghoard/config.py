@@ -26,7 +26,7 @@ def find_pg_binary(program, versions=None):
     pathformats = ["/usr/pgsql-{ver}/bin/{prog}", "/usr/lib/postgresql/{ver}/bin/{prog}"]
     for ver in versions or SUPPORTED_VERSIONS:
         for pathfmt in pathformats:
-            if ver in ("10", "11") and program == "pg_receivexlog":
+            if ver in ("10", "11", "12", "13") and program == "pg_receivexlog":
                 program = "pg_receivewal"
             pgbin = pathfmt.format(ver=ver, prog=program)
             if os.path.exists(pgbin):
