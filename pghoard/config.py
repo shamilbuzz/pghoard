@@ -22,7 +22,7 @@ def get_cpu_count():
     return multiprocessing.cpu_count()
 
 
-def find_pg_binary(program, versions=None):
+def find_pg_binary(program, versions=None, bin_dir=None):
     pathformats = ["/usr/pgsql-{ver}/bin/{prog}", "/usr/lib/postgresql/{ver}/bin/{prog}"]
     for ver in versions or SUPPORTED_VERSIONS:
         for pathfmt in pathformats:
@@ -31,6 +31,8 @@ def find_pg_binary(program, versions=None):
             pgbin = pathfmt.format(ver=ver, prog=program)
             if os.path.exists(pgbin):
                 return pgbin, ver
+    if bin_dir:
+        return os.path.join(bin_dir, program), None
     return os.path.join("/usr/bin", program), None
 
 
@@ -134,7 +136,7 @@ def set_and_check_config_defaults(config, *, check_commands=True, check_pgdata=T
                     pg_versions_to_check = None
                     if "pg_data_directory_version" in site_config:
                         pg_versions_to_check = [site_config["pg_data_directory_version"]]
-                    command_path, _ = find_pg_binary(command, pg_versions_to_check)
+                    command_path, _ = find_pg_binary(command, pg_versions_to_check, bin_dir)
             site_config[command_key] = command_path
 
             if check_commands and site_config["active"]:
