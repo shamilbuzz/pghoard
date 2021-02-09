@@ -4,7 +4,7 @@ cryptography
 google-api-python-client
 httplib2
 oauth2client
-psycopg2
+psycopg2-binary
 python-dateutil 
 python-snappy
 python-systemd 

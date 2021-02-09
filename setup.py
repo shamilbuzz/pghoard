@@ -19,7 +19,7 @@ setup(
     packages=find_packages(exclude=["test"]),
     install_requires=[
         "cryptography",
-        "psycopg2 >= 2.0.0",
+        "psycopg2-binary >= 2.0.0",
         "python-dateutil",
         "python-snappy >= 0.5",
         "requests >= 1.2.0",
