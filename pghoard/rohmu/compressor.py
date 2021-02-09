@@ -42,7 +42,6 @@ def CompressionFile(dst_fp, algorithm, level=0, threads=0):
 
 class CompressionStream(Stream):
     """Non-seekable stream of data that adds compression on top of given source stream"""
-
     def __init__(self, src_fp, algorithm, level=0):
         super().__init__(src_fp, minimum_read_size=32 * 1024)
         if algorithm == "lzma":
@@ -52,7 +51,7 @@ class CompressionStream(Stream):
         elif algorithm == "zstd":
             self._compressor = zstd.ZstdCompressor(level=level).compressobj()
         else:
-            InvalidConfigurationError("invalid compression algorithm: {!r}".format(algorithm))
+            raise InvalidConfigurationError("invalid compression algorithm: {!r}".format(algorithm))
 
     def _process_chunk(self, data):
         return self._compressor.compress(data)
