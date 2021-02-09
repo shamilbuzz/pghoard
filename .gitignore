@@ -14,5 +14,9 @@ __pycache__/
 /pghoard.egg-info/
 /pghoard-rpm-src.tar
 /rpm/
-.idea
 .vagrant
+/venv/
+/.venv/
+*.orig
+
+pghoard-config-ignore.json

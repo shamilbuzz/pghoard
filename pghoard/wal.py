@@ -4,15 +4,18 @@ pghoard: inspect WAL files
 Copyright (c) 2016 Ohmu Ltd
 See LICENSE for details
 """
-from .common import replication_connection_string_and_slot_using_pgpass
-from collections import namedtuple
 import re
 import struct
 import subprocess
+from collections import namedtuple
 
+from .common import replication_connection_string_and_slot_using_pgpass
+
+PARTIAL_WAL_RE = re.compile(r"^[A-F0-9]{24}\.partial$")
 TIMELINE_RE = re.compile(r"^[A-F0-9]{8}\.history$")
 WAL_RE = re.compile("^[A-F0-9]{24}$")
 WAL_HEADER_LEN = 20
+# Look at the file src/include/access/xlog_internal.h and grep for XLOG_PAGE_MAGIC
 WAL_MAGIC = {
     0xD071: 90200,  # Though PGHoard no longer supports version 9.2, magic number is left for WAL identification purposes
     0xD075: 90300,
@@ -21,6 +24,8 @@ WAL_MAGIC = {
     0xD093: 90600,
     0xD097: 100000,
     0xD098: 110000,
+    0xD101: 120000,
+    0xD106: 130000,
 }
 WAL_MAGIC_BY_VERSION = {value: key for key, value in WAL_MAGIC.items()}
 
@@ -28,12 +33,23 @@ WAL_MAGIC_BY_VERSION = {value: key for key, value in WAL_MAGIC.items()}
 # looks like everyone uses the default (16MB) and it's all we support for now.
 WAL_SEG_SIZE = 16 * 1024 * 1024
 
+
+class LsnMismatchError(ValueError):
+    """WAL header LSN does not match file name"""
+
+
+class WalBlobLengthError(ValueError):
+    """WAL blob is shorter than the WAL header"""
+
+
 WalHeader = namedtuple("WalHeader", ("version", "timeline", "lsn", "filename"))
 
 
 def read_header(blob):
     if len(blob) < WAL_HEADER_LEN:
-        raise ValueError("Need at least {} bytes of input to read WAL header, got {}".format(WAL_HEADER_LEN, len(blob)))
+        raise WalBlobLengthError(
+            "Need at least {} bytes of input to read WAL header, got {}".format(WAL_HEADER_LEN, len(blob))
+        )
     magic, info, tli, pageaddr, rem_len = struct.unpack("=HHIQI", blob[:WAL_HEADER_LEN])  # pylint: disable=unused-variable
     version = WAL_MAGIC[magic]
     log = pageaddr >> 32
@@ -97,10 +113,7 @@ def construct_wal_name(sysinfo):
     log_hex, seg_hex = sysinfo["xlogpos"].split("/", 1)
     # seg_hex's topmost 8 bits are filename, low 24 bits are position in
     # file which we are not interested in
-    return name_for_tli_log_seg(
-        tli=int(sysinfo["timeline"]),
-        log=int(log_hex, 16),
-        seg=int(seg_hex, 16) >> 24)
+    return name_for_tli_log_seg(tli=int(sysinfo["timeline"]), log=int(log_hex, 16), seg=int(seg_hex, 16) >> 24)
 
 
 def get_current_wal_from_identify_system(conn_str):
@@ -123,6 +136,7 @@ def verify_wal(*, wal_name, fileobj=None, filepath=None):
     try:
         if fileobj:
             pos = fileobj.tell()
+            fileobj.seek(0)
             header_bytes = fileobj.read(WAL_HEADER_LEN)
             fileobj.seek(pos)
             source_name = getattr(fileobj, "name", "<UNKNOWN>")
@@ -139,4 +153,4 @@ def verify_wal(*, wal_name, fileobj=None, filepath=None):
     expected_lsn = lsn_from_name(wal_name)
     if hdr.lsn != expected_lsn:
         fmt = "Expected LSN {lsn!r} in WAL file {name!r}; found {found!r}"
-        raise ValueError(fmt.format(lsn=expected_lsn, name=source_name, found=hdr.lsn))
+        raise LsnMismatchError(fmt.format(lsn=expected_lsn, name=source_name, found=hdr.lsn))

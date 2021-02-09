@@ -4,15 +4,18 @@ pghoard
 Copyright (c) 2015 Ohmu Ltd
 See LICENSE for details
 """
-from .base import CONSTANT_TEST_RSA_PUBLIC_KEY, CONSTANT_TEST_RSA_PRIVATE_KEY
-from pghoard.rohmu import IO_BLOCK_SIZE
-from pghoard.rohmu.encryptor import Decryptor, DecryptorFile, Encryptor, EncryptorFile, EncryptorStream
 import io
 import json
 import os
-import pytest
 import random
 import tarfile
+
+import pytest
+
+from pghoard.rohmu import IO_BLOCK_SIZE
+from pghoard.rohmu.encryptor import (Decryptor, DecryptorFile, Encryptor, EncryptorFile, EncryptorStream)
+
+from .base import CONSTANT_TEST_RSA_PRIVATE_KEY, CONSTANT_TEST_RSA_PUBLIC_KEY
 
 
 def test_encryptor_decryptor():
@@ -55,6 +58,7 @@ def test_encryptor_stream():
             assert not encrypted_stream.read(1)
             break
         assert len(data) == bytes_requested
+        assert encrypted_stream.tell() == result_data.tell()
     assert result_data.tell() > 0
     result_data.seek(0)
     decrypted = DecryptorFile(result_data, CONSTANT_TEST_RSA_PRIVATE_KEY).read()

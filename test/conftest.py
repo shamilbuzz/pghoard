@@ -4,24 +4,28 @@ pghoard: fixtures for tests
 Copyright (c) 2015 Ohmu Ltd
 See LICENSE for details
 """
-from pghoard import config as pghconfig, logutil, pgutil
-from pghoard.pghoard import PGHoard
-from pghoard.rohmu.compat import suppress
-from pghoard.rohmu.snappyfile import snappy
-from py import path as py_path  # pylint: disable=no-name-in-module
 import contextlib
 import json
 import lzma
 import os
-import psycopg2
-import pytest
 import random
 import re
 import signal
 import subprocess
 import tempfile
 import time
+from distutils.version import LooseVersion
+from unittest import SkipTest
 
+import psycopg2
+import pytest
+from py import path as py_path  # pylint: disable=no-name-in-module
+
+from pghoard import config as pghconfig
+from pghoard import logutil, pgutil
+from pghoard.pghoard import PGHoard
+from pghoard.rohmu.compat import suppress
+from pghoard.rohmu.snappyfile import snappy
 
 logutil.configure_logging()
 
@@ -49,10 +53,14 @@ class PGTester:
     def run_pg(self):
         cmd = [
             os.path.join(self.pgbin, "postgres"),
-            "-D", self.pgdata,
-            "-k", self.pgdata,
-            "-p", self.user["port"],
-            "-c", "listen_addresses=",
+            "-D",
+            self.pgdata,
+            "-k",
+            self.pgdata,
+            "-p",
+            self.user["port"],
+            "-c",
+            "listen_addresses=",
         ]
         self.pg = subprocess.Popen(cmd)
         time.sleep(1.0)  # let pg start
@@ -122,6 +130,10 @@ def setup_pg():
             # don't need to wait for autovacuum workers when shutting down
             "autovacuum": "off",
         })
+        # Setting name has changed in PG 13, set comparison needed because 9.6 is somehow larger than 13 for the comparison
+        if db.pgver >= "13" and db.pgver not in {"9.5", "9.6"}:
+            del config["wal_keep_segments"]
+            config["wal_keep_size"] = 16 * 100
         lines = ["{} = {}\n".format(key, val) for key, val in sorted(config.items())]  # noqa
         fp.write("".join(lines))
     # now start pg and create test users
@@ -157,12 +169,24 @@ def recovery_db():
         conn.close()
         # Now perform a clean shutdown and restart in recovery
         pg.kill(force=False, immediate=False)
-        with open(os.path.join(pg.pgdata, "recovery.conf"), "w") as fp:
-            fp.write(
-                "standby_mode = 'on'\n"
-                "recovery_target_timeline = 'latest'\n"
-                "restore_command = 'false'\n"
-            )
+
+        recovery_conf = [
+            "recovery_target_timeline = 'latest'",
+            "restore_command = 'false'",
+        ]
+        if LooseVersion(pg.ver) >= "12":
+            with open(os.path.join(pg.pgdata, "standby.signal"), "w") as fp:
+                pass
+
+            recovery_conf_path = "postgresql.auto.conf"
+            open_mode = "a"  # As it might exist already in some cases
+        else:
+            recovery_conf.append("standby_mode = 'on'")
+            recovery_conf_path = "recovery.conf"
+            open_mode = "w"
+
+        with open(os.path.join(pg.pgdata, recovery_conf_path), open_mode) as fp:
+            fp.write("\n".join(recovery_conf) + "\n")
         pg.run_pg()
         yield pg
 
@@ -172,11 +196,53 @@ def pghoard(db, tmpdir, request):  # pylint: disable=redefined-outer-name
     yield from pghoard_base(db, tmpdir, request)
 
 
-def pghoard_base(db, tmpdir, request, compression="snappy",   # pylint: disable=redefined-outer-name
-                 transfer_count=None, metrics_cfg=None):
+@pytest.yield_fixture  # pylint: disable=redefined-outer-name
+def pghoard_separate_volume(db, tmpdir, request):
+    tmpfs_volume = os.path.join(str(tmpdir), "tmpfs")
+    os.makedirs(tmpfs_volume, exist_ok=True)
+    # Tests that require separate volume with restricted space can only be run in
+    # environments where sudo can be executed without password prompts.
+    try:
+        subprocess.check_call(
+            ["sudo", "-S", "mount", "-t", "tmpfs", "-o", "size=100m", "tmpfs", tmpfs_volume],
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as ex:
+        raise SkipTest("Failed to create tmpfs: {!r}".format(ex))
+
+    backup_location = os.path.join(tmpfs_volume, "backupspool")
+    try:
+        yield from pghoard_base(
+            db,
+            tmpdir,
+            request,
+            backup_location=backup_location,
+            pg_receivexlog_config={
+                "disk_space_check_interval": 0.0001,
+                "min_disk_free_bytes": 70 * 1024 * 1024,
+                "resume_multiplier": 1.2,
+            },
+        )
+    finally:
+        subprocess.check_call(["sudo", "umount", tmpfs_volume])
+
+
+def pghoard_base(
+    db,
+    tmpdir,
+    request,
+    compression="snappy",  # pylint: disable=redefined-outer-name
+    transfer_count=None,
+    metrics_cfg=None,
+    *,
+    backup_location=None,
+    pg_receivexlog_config=None
+):
     test_site = request.function.__name__
 
-    if os.environ.get("pghoard_test_walreceiver"):
+    if pg_receivexlog_config:
+        active_backup_mode = "pg_receivexlog"
+    elif os.environ.get("pghoard_test_walreceiver"):
         active_backup_mode = "walreceiver"
     else:
         active_backup_mode = "pg_receivexlog"
@@ -184,9 +250,10 @@ def pghoard_base(db, tmpdir, request, compression="snappy",   # pylint: disable=
     if compression == "snappy" and not snappy:
         compression = "lzma"
 
+    backup_location = backup_location or os.path.join(str(tmpdir), "backupspool")
     config = {
         "alert_file_dir": os.path.join(str(tmpdir), "alerts"),
-        "backup_location": os.path.join(str(tmpdir), "backupspool"),
+        "backup_location": backup_location,
         "backup_sites": {
             test_site: {
                 "active_backup_mode": active_backup_mode,
@@ -194,6 +261,7 @@ def pghoard_base(db, tmpdir, request, compression="snappy",   # pylint: disable=
                 "basebackup_interval_hours": 24,
                 "pg_bin_directory": db.pgbin,
                 "pg_data_directory": db.pgdata,
+                "pg_receivexlog": pg_receivexlog_config or {},
                 "nodes": [db.user],
                 "object_storage": {
                     "storage_type": "local",

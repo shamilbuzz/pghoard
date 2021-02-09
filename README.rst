@@ -1,7 +1,7 @@
 PGHoard |BuildStatus|_
 ======================
 
-.. |BuildStatus| image:: https://travis-ci.org/aiven/pghoard.png?branch=master
+.. |BuildStatus| image:: https://travis-ci.org/aiven/pghoard.svg?branch=master
 .. _BuildStatus: https://travis-ci.org/aiven/pghoard
 
 ``pghoard`` is a PostgreSQL backup daemon and restore tooling that stores backup data in cloud object stores.
@@ -79,7 +79,7 @@ Requirements
 ============
 
 PGHoard can backup and restore PostgreSQL versions 9.3 and above.  The
-daemon is implemented in Python and works with CPython version 3.3 or newer.
+daemon is implemented in Python and works with CPython version 3.5 or newer.
 The following Python modules are required:
 
 * psycopg2_ to look up transaction log metadata
@@ -90,7 +90,7 @@ The following Python modules are required:
 
 Optional requirements include:
 
-* azure_ for Microsoft Azure object storage
+* azure_ for Microsoft Azure object storage (patched version required, see link)
 * botocore_ for AWS S3 (or Ceph-S3) object storage
 * google-api-client_ for Google Cloud object storage
 * cryptography_ for backup encryption and decryption (version 0.8 or newer required)
@@ -100,7 +100,7 @@ Optional requirements include:
 * swiftclient_ for OpenStack Swift object storage
 * paramiko_  for sftp object storage
 
-.. _`azure`: https://github.com/Azure/azure-sdk-for-python
+.. _`azure`: https://github.com/aiven/azure-sdk-for-python/tree/aiven/rpm_fixes
 .. _`botocore`: https://github.com/boto/botocore
 .. _`google-api-client`: https://github.com/google/google-api-python-client
 .. _`cryptography`: https://cryptography.io/
@@ -476,6 +476,35 @@ Determines log level of ``pghoard``.
 
 If a file exists in this location, no new backup actions will be started.
 
+``pg_receivexlog``
+
+When active backup mode is set to ``"pg_receivexlog"`` this object may
+optionally specify additional configuration options. The currently available
+options are all related to monitoring disk space availability and optionally
+pausing xlog/WAL receiving when disk space goes below configured threshold.
+This is useful when PGHoard is configured to create its temporary files on
+a different volume than where the main PostgreSQL data directory resides. By
+default this logic is disabled and the minimum free bytes must be configured
+to enable it.
+
+``pg_receivexlog.disk_space_check_interval`` (default ``10``)
+
+How often to check available disk space.
+
+``pg_receivexlog.min_disk_free_bytes`` (default undefined)
+
+Minimum bytes (as an integer) that must be available in order to keep on
+receiving xlogs/WAL from PostgreSQL. If available disk space goes below this
+limit a ``STOP`` signal is sent to the ``pg_receivexlog`` / ``pg_receivewal``
+application.
+
+``pg_receivexlog.resume_multiplier`` (default ``1.5``)
+
+Number of times the ``min_disk_free_bytes`` bytes of disk space that is
+required to start receiving xlog/WAL again (i.e. send the ``CONT`` signal to
+the ``pg_receivexlog`` / ``pg_receivewal`` process). Multiplier above 1
+should be used to avoid stopping and continuing the process constantly.
+
 ``restore_prefetch`` (default ``transfer.thread_count``)
 
 Number of files to prefetch when performing archive recovery.  The default
@@ -578,6 +607,12 @@ The following options control the behavior of each backup site.  A backup
 site means an individual PostgreSQL installation ("cluster" in PostgreSQL
 terminology) from which to take backups.
 
+``basebackup_age_days_max`` (default undefined)
+
+Maximum age for basebackups. Basebackups older than this will be removed. By
+default this value is not defined and basebackups are deleted based on total
+count instead.
+
 ``basebackup_chunks_in_progress`` (default ``5``)
 
 How many basebackup chunks can there be simultaneously on disk while
@@ -589,10 +624,38 @@ In how large backup chunks to take a ``local-tar`` basebackup. Disk
 space needed for a successful backup is this variable multiplied by
 ``basebackup_chunks_in_progress``.
 
+``basebackup_compression_threads`` (default ``0``)
+
+Number of threads to use within compression library during basebackup. Only
+applicable when using compression library that supports internal multithreading,
+namely zstd at the moment. Default value 0 means not to use multithreading.
+
 ``basebackup_count`` (default ``2``)
 
 How many basebackups should be kept around for restoration purposes.  The
-more there are the more diskspace will be used.
+more there are the more diskspace will be used. If ``basebackup_max_age`` is
+defined this controls the maximum number of basebackups to keep; if backup
+interval is less than 24 hour or extra backups are created there can be more
+than one basebackup per day and it is often desirable to set
+``basebackup_count`` to something slightly higher than the max age in days.
+
+``basebackup_count_min`` (default ``2``)
+
+Minimum number of basebackups to keep. This is only effective when
+``basebackup_age_days_max`` has been defined. If for example the server is
+powered off and then back on a month later, all existing backups would be very
+old. However, in that case it is usually not desirable to immediately delete
+all old backups. This setting allows specifying a minimum number of backups
+that should always be preserved regardless of their age.
+
+``basebackup_hour`` (default undefined)
+
+The hour of day during which to start new basebackup. If backup interval is
+less than 24 hours this is the base hour used to calculate the hours at which
+backup should be taken. E.g. if backup interval is 6 hours and this value is
+set to 1 backups will be taken at hours 1, 7, 13 and 19. This value is only
+effective if also ``basebackup_interval_hours`` and ``basebackup_minute`` are
+set.
 
 ``basebackup_interval_hours`` (default ``24``)
 
@@ -600,6 +663,12 @@ How often to take a new basebackup of a cluster.  The shorter the interval,
 the faster your recovery will be, but the more CPU/IO usage is required from
 the servers it takes the basebackup from.  If set to a null value basebackups
 are not automatically taken at all.
+
+``basebackup_minute`` (default undefined)
+
+The minute of hour during which to start new basebackup. This value is only
+effective if also ``basebackup_interval_hours`` and ``basebackup_hour`` are
+set.
 
 ``basebackup_mode`` (default ``"basic"``)
 
@@ -620,6 +689,13 @@ tablespaces.
 
 Note that the ``local-tar`` backup mode can not be used on replica servers
 prior to PostgreSQL 9.6 unless the pgespresso extension is installed.
+
+``basebackup_threads`` (default ``1``)
+
+How many threads to use for tar, compress and encrypt tasks. Only applies for
+``local-tar`` basebackup mode. Only values 1 and 2 are likely to be sensible for
+this, with higher thread count speed improvement is negligible and CPU time is
+lost switching between threads.
 
 ``encryption_key_id`` (no default)
 
@@ -798,12 +874,10 @@ http://www.apache.org/licenses/LICENSE-2.0.txt
 Credits
 =======
 
-PGHoard was created by Hannu Valtonen <hannu.valtonen@ohmu.fi> for
-`Aiven Cloud Database`_ and is now maintained by `Ohmu Ltd`_ hackers and
-Aiven developers <pghoard@ohmu.fi>.
+PGHoard was created by Hannu Valtonen <hannu.valtonen@aiven.io> for
+`Aiven`_ and is now maintained by Aiven developers <opensource@aiven.io>.
 
-.. _`Ohmu Ltd`: https://ohmu.fi/
-.. _`Aiven Cloud Database`: https://aiven.io/
+.. _`Aiven`: https://aiven.io/
 
 Recent contributors are listed on the GitHub project page,
 https://github.com/aiven/pghoard/graphs/contributors
@@ -815,10 +889,10 @@ Contact
 Bug reports and patches are very welcome, please post them as GitHub issues
 and pull requests at https://github.com/aiven/pghoard .  Any possible
 vulnerabilities or other serious issues should be reported directly to the
-maintainers <opensource@ohmu.fi>.
+maintainers <opensource@aiven.io>.
 
 
 Copyright
 =========
 
-Copyright (C) 2015 Ohmu Ltd
+Copyright (C) 2015 Aiven Ltd

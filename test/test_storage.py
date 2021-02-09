@@ -4,19 +4,22 @@ pghoard - rohmu object storage interface tests
 Copyright (c) 2016 Ohmu Ltd
 See LICENSE for details
 """
-from io import BytesIO
-from pghoard.common import get_object_storage_config
-from pghoard.rohmu import compat, errors, get_transfer
 import datetime
 import hashlib
 import os
-import pytest
 import uuid
+from io import BytesIO
 
+import pytest
+
+from pghoard.common import get_object_storage_config
+from pghoard.rohmu import compat, errors, get_transfer
 from pghoard.rohmu.object_storage.base import KEY_TYPE_OBJECT
+from pghoard.rohmu.object_storage.google import MediaStreamUpload
 
 try:
-    from . import test_storage_configs  # pylint: disable=no-name-in-module, import-error
+    from . import \
+        test_storage_configs  # pylint: disable=no-name-in-module, import-error
 except ImportError:
     test_storage_configs = object()
 
@@ -77,7 +80,7 @@ def _test_storage(st, driver, tmpdir, storage_config):
             Bucket=st.bucket_name,
             Key=st.format_key_for_backend("test1/x1"),
         )
-        assert bool(response.get("ServerSideEncryption")) == bool(storage_config.get('encrypted'))
+        assert bool(response.get("ServerSideEncryption")) == bool(storage_config.get("encrypted"))
 
     st.store_file_from_memory("test1/x1", b"dummy", {"k": "v"})
     out = BytesIO()
@@ -197,9 +200,9 @@ def _test_storage(st, driver, tmpdir, storage_config):
 
     if driver == "google":
         # test extra props for cacheControl in google
-        st.store_file_from_memory("test1/x1", b"no cache test",
-                                  metadata={"test": "value"},
-                                  extra_props={"cacheControl": "no-cache"})
+        st.store_file_from_memory(
+            "test1/x1", b"no cache test", metadata={"test": "value"}, extra_props={"cacheControl": "no-cache"}
+        )
 
     if driver == "local":
         # test LocalFileIsRemoteFileError for local storage
@@ -239,8 +242,16 @@ def _test_storage(st, driver, tmpdir, storage_config):
             test_size_send += len(chunk)
     test_hash_send = test_hash.hexdigest()
 
-    st.store_file_from_disk("test1/30m", test_file, multipart=True,
-                            metadata={"thirtymeg": "data", "size": test_size_send, "key": "value-with-a-hyphen"})
+    st.store_file_from_disk(
+        "test1/30m",
+        test_file,
+        multipart=True,
+        metadata={
+            "thirtymeg": "data",
+            "size": test_size_send,
+            "key": "value-with-a-hyphen"
+        }
+    )
 
     os.unlink(test_file)
 
@@ -286,8 +297,12 @@ def _test_storage(st, driver, tmpdir, storage_config):
             # reupload a file with the same name but with less chunks
             os.truncate(test_file, st.segment_size + 1)
             test_size_send = os.path.getsize(test_file)
-            st.store_file_from_disk("test1/30m", test_file, multipart=True,
-                                    metadata={"30m": "less data", "size": test_size_send})
+            st.store_file_from_disk(
+                "test1/30m", test_file, multipart=True, metadata={
+                    "30m": "less data",
+                    "size": test_size_send
+                }
+            )
 
             segment_list = st.list_path("test1_segments/30m")
             assert len(segment_list) == 2
@@ -304,21 +319,26 @@ def _test_storage(st, driver, tmpdir, storage_config):
     def upload_progress(progress):
         progress_reports.append(progress)
 
-    for size in (300, 3 * 1024 * 1024, 11 * 1024 * 1024):
-        progress_reports = []
-        rds = RandomDataSource(size)
-        key = "test1/{}b".format(size)
-        st.store_file_object(key, rds, upload_progress_fn=upload_progress)
-        # Progress may be reported after each chunk and chunk size depends on available memory
-        # on current machine so there's no straightforward way of checking reasonable progress
-        # updates were made. Just ensure they're ordered correctly if something was provided
-        assert sorted(progress_reports) == progress_reports
-        bio = BytesIO()
-        st.get_contents_to_fileobj(key, bio)
-        buffer = bio.getbuffer()
-        assert len(buffer) == size
-        assert buffer == rds.data
-        st.delete_key(key)
+    for seekable in (False, True):
+        for size in (300, 3 * 1024 * 1024, 11 * 1024 * 1024):
+            progress_reports = []
+            rds = RandomDataSource(size)
+            if seekable:
+                fd = BytesIO(rds.data)
+            else:
+                fd = rds
+            key = "test1/{}b".format(size)
+            st.store_file_object(key, fd, upload_progress_fn=upload_progress)
+            # Progress may be reported after each chunk and chunk size depends on available memory
+            # on current machine so there's no straightforward way of checking reasonable progress
+            # updates were made. Just ensure they're ordered correctly if something was provided
+            assert sorted(progress_reports) == progress_reports
+            bio = BytesIO()
+            st.get_contents_to_fileobj(key, bio)
+            buffer = bio.getbuffer()
+            assert len(buffer) == size
+            assert buffer == rds.data
+            st.delete_key(key)
 
 
 # sftp test support is available in vagrant, so can test just like for local if running in vagrant
@@ -370,8 +390,7 @@ def test_storage_aws_s3_with_prefix(tmpdir):
 
 
 def test_storage_aws_s3_no_prefix_with_encryption(tmpdir):
-    _test_storage_init("aws_s3", False, tmpdir,
-                       config_overrides={"encrypted": True})
+    _test_storage_init("aws_s3", False, tmpdir, config_overrides={"encrypted": True})
 
 
 def test_storage_azure_no_prefix(tmpdir):
@@ -431,15 +450,21 @@ def test_storage_sftp_with_prefix(tmpdir):
 
 
 def test_storage_sftp_no_prefix_private_key(tmpdir):
-    _test_storage_init("sftp", False, tmpdir,
-                       config_overrides={"private_key": "/home/vagrant/.ssh/id_rsa",
-                                         "password": "wrongpassword"})
+    _test_storage_init(
+        "sftp", False, tmpdir, config_overrides={
+            "private_key": "/home/vagrant/.ssh/id_rsa",
+            "password": "wrongpassword"
+        }
+    )
 
 
 def test_storage_sftp_with_prefix_private_key(tmpdir):
-    _test_storage_init("sftp", True, tmpdir,
-                       config_overrides={"private_key": "/home/vagrant/.ssh/id_rsa",
-                                         "password": "wrongpassword"})
+    _test_storage_init(
+        "sftp", True, tmpdir, config_overrides={
+            "private_key": "/home/vagrant/.ssh/id_rsa",
+            "password": "wrongpassword"
+        }
+    )
 
 
 def test_storage_config(tmpdir):
@@ -484,3 +509,13 @@ class RandomDataSource:
         data = self.data[self.bytes_returned:bytes_to_return + self.bytes_returned]
         self.bytes_returned += bytes_to_return
         return data
+
+
+def test_media_stream_upload_read():
+    bio = BytesIO(b"abcdefg")
+    msu = MediaStreamUpload(bio, chunk_size=1024, mime_type="application/octet-stream", name="foo")
+    assert msu.getbytes(0, 4) == b"abcd"
+    assert msu.getbytes(2, 4) == b"cdef"
+    assert msu.getbytes(2, 5) == b"cdefg"
+    with pytest.raises(IndexError):
+        msu.getbytes(0, 7)

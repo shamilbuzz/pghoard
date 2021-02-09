@@ -5,11 +5,12 @@ Copyright (c) 2016 Ohmu Ltd
 See LICENSE for details
 """
 
+import lzma
+
 from .errors import InvalidConfigurationError
 from .filewrap import Sink, Stream
 from .snappyfile import SnappyFile
 from .zstdfile import open as zstd_open
-import lzma
 
 try:
     import snappy
@@ -22,7 +23,7 @@ except ImportError:
     zstd = None
 
 
-def CompressionFile(dst_fp, algorithm, level=0):
+def CompressionFile(dst_fp, algorithm, level=0, threads=0):
     """This looks like a class to users, but is actually a function that instantiates a class based on algorithm."""
     if algorithm == "lzma":
         return lzma.open(dst_fp, "w", preset=level)
@@ -31,7 +32,7 @@ def CompressionFile(dst_fp, algorithm, level=0):
         return SnappyFile(dst_fp, "wb")
 
     if algorithm == "zstd":
-        return zstd_open(dst_fp, "wb")
+        return zstd_open(dst_fp, "wb", level=level, threads=threads)
 
     if algorithm:
         raise InvalidConfigurationError("invalid compression algorithm: {!r}".format(algorithm))
@@ -41,7 +42,6 @@ def CompressionFile(dst_fp, algorithm, level=0):
 
 class CompressionStream(Stream):
     """Non-seekable stream of data that adds compression on top of given source stream"""
-
     def __init__(self, src_fp, algorithm, level=0):
         super().__init__(src_fp, minimum_read_size=32 * 1024)
         if algorithm == "lzma":
@@ -51,7 +51,7 @@ class CompressionStream(Stream):
         elif algorithm == "zstd":
             self._compressor = zstd.ZstdCompressor(level=level).compressobj()
         else:
-            InvalidConfigurationError("invalid compression algorithm: {!r}".format(algorithm))
+            raise InvalidConfigurationError("invalid compression algorithm: {!r}".format(algorithm))
 
     def _process_chunk(self, data):
         return self._compressor.compress(data)

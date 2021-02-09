@@ -4,10 +4,6 @@ pghoard - common utility functions
 Copyright (c) 2016 Ohmu Ltd
 See LICENSE for details
 """
-from pghoard import pgutil
-from pghoard.rohmu import IO_BLOCK_SIZE
-from pghoard.rohmu.compat import suppress
-from pghoard.rohmu.errors import Error, InvalidConfigurationError
 import datetime
 import fcntl
 import json
@@ -18,7 +14,12 @@ import re
 import tarfile
 import tempfile
 import time
+from distutils.version import LooseVersion
 
+from pghoard import pgutil
+from pghoard.rohmu import IO_BLOCK_SIZE
+from pghoard.rohmu.compat import suppress
+from pghoard.rohmu.errors import Error, InvalidConfigurationError
 
 LOG = logging.getLogger("pghoard.common")
 
@@ -34,7 +35,8 @@ def create_pgpass_file(connection_string_or_info):
         host=info.get("host", "localhost"),
         port=info.get("port", 5432),
         user=info.get("user", ""),
-        dbname=info.get("dbname", "*"))
+        dbname=info.get("dbname", "*")
+    )
     pwline = "{linekey}{password}".format(linekey=linekey, password=info.pop("password"))
     pgpass_path = os.path.join(os.environ.get("HOME"), ".pgpass")
     if os.path.exists(pgpass_path):
@@ -159,11 +161,13 @@ def default_json_serialization(obj):
 
 
 def json_encode(obj, compact=True, binary=False):
-    res = json.dumps(obj,
-                     sort_keys=not compact,
-                     indent=None if compact else 4,
-                     separators=(",", ":") if compact else None,
-                     default=default_json_serialization)
+    res = json.dumps(
+        obj,
+        sort_keys=not compact,
+        indent=None if compact else 4,
+        separators=(",", ":") if compact else None,
+        default=default_json_serialization
+    )
     return res.encode("utf-8") if binary else res
 
 
@@ -220,7 +224,7 @@ def extract_pghoard_bb_v2_metadata(fileobj):
 
 
 def get_pg_wal_directory(config):
-    if config["pg_data_directory_version"] in ("10", "11", "12", "13"):
+    if LooseVersion(config["pg_data_directory_version"]) >= "10":
         return os.path.join(config["pg_data_directory"], "pg_wal")
     return os.path.join(config["pg_data_directory"], "pg_xlog")
 
@@ -229,9 +233,26 @@ def increase_pipe_capacity(*pipes):
     if platform.system() != "Linux":
         return
     try:
-        with open('/proc/sys/fs/pipe-max-size', 'r') as f:
+        with open("/proc/sys/fs/pipe-max-size", "r") as f:
             pipe_max_size = int(f.read())
-            for pipe in pipes:
-                fcntl.fcntl(pipe, 1031, pipe_max_size)
     except FileNotFoundError:
-        pass
+        return
+    # Attempt to get as big pipe as possible; as Linux pipe usage quotas are
+    # account wide (and not visible to us), brute-force attempting is
+    # the best we can do.
+    #
+    # F_SETPIPE_SZ can also return EBUSY if trying to shrink pipe from
+    # what is in the buffer (not true in our case as pipe should be
+    # growing), or ENOMEM, and we bail in both of those cases.
+    for pipe in pipes:
+        for shift in range(0, 16):
+            size = pipe_max_size >> shift
+            if size <= 65536:
+                # Default size
+                LOG.warning("Unable to grow pipe buffer at all, performance may suffer")
+                return
+            try:
+                fcntl.fcntl(pipe, 1031, pipe_max_size)  # F_SETPIPE_SZ
+                break
+            except PermissionError:
+                pass

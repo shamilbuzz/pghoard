@@ -4,16 +4,19 @@ pghoard
 Copyright (c) 2015 Ohmu Ltd
 See LICENSE for details
 """
-# pylint: disable=attribute-defined-outside-init
-from .base import PGHoardTestCase
+import os
+import time
+from queue import Empty, Queue
+from unittest.mock import Mock
+
+import pytest
+
 from pghoard import metrics
 from pghoard.rohmu.errors import FileNotFoundFromStorageError, StorageError
 from pghoard.transfer import TransferAgent
-from queue import Empty, Queue
-from unittest.mock import Mock
-import os
-import pytest
-import time
+
+# pylint: disable=attribute-defined-outside-init
+from .base import PGHoardTestCase
 
 
 class MockStorage(Mock):
@@ -64,7 +67,8 @@ class TestTransferAgent(PGHoardTestCase):
             mp_manager=None,
             transfer_queue=self.transfer_queue,
             metrics=metrics.Metrics(statsd={}),
-            shared_state_dict={})
+            shared_state_dict={}
+        )
         self.transfer_agent.start()
 
     def teardown_method(self, method):
@@ -100,7 +104,9 @@ class TestTransferAgent(PGHoardTestCase):
             "file_size": 3,
             "filetype": "xlog",
             "local_path": self.foo_path,
-            "metadata": {"start-wal-segment": "00000001000000000000000C"},
+            "metadata": {
+                "start-wal-segment": "00000001000000000000000C"
+            },
             "site": self.test_site,
             "type": "UPLOAD",
         })
@@ -117,13 +123,16 @@ class TestTransferAgent(PGHoardTestCase):
             "file_size": 3,
             "filetype": "basebackup",
             "local_path": self.foo_basebackup_path,
-            "metadata": {"start-wal-segment": "00000001000000000000000C"},
+            "metadata": {
+                "start-wal-segment": "00000001000000000000000C"
+            },
             "site": self.test_site,
             "type": "UPLOAD",
         })
         assert callback_queue.get(timeout=1.0) == {"success": True, "opaque": None}
         assert os.path.exists(self.foo_basebackup_path) is False
 
+    @pytest.mark.timeout(10)
     def test_handle_failing_upload_xlog(self):
         sleeps = []
 
@@ -141,12 +150,15 @@ class TestTransferAgent(PGHoardTestCase):
             "file_size": 3,
             "filetype": "xlog",
             "local_path": self.foo_path,
-            "metadata": {"start-wal-segment": "00000001000000000000000C"},
+            "metadata": {
+                "start-wal-segment": "00000001000000000000000C"
+            },
             "site": self.test_site,
             "type": "UPLOAD",
         })
-        with pytest.raises(Empty):
-            callback_queue.get(timeout=0.1)
+        while len(sleeps) < 8:
+            with pytest.raises(Empty):
+                callback_queue.get(timeout=0.01)
         alert_file_path = os.path.join(self.config["alert_file_dir"], "upload_retries_warning")
         assert os.path.exists(alert_file_path) is True
         os.unlink(alert_file_path)

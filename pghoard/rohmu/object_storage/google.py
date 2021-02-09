@@ -6,16 +6,8 @@ See LICENSE for details
 """
 # pylint: disable=import-error, no-name-in-module
 
-# NOTE: this import is not needed per-se, but it's imported here first to point the
-# user to the most important possible missing dependency
-import googleapiclient  # noqa pylint: disable=unused-import
-
-from contextlib import contextmanager
-from io import BytesIO, FileIO
-from http.client import IncompleteRead
 import codecs
 import errno
-import httplib2
 import json
 import logging
 import os
@@ -23,12 +15,23 @@ import random
 import socket
 import ssl
 import time
+from contextlib import contextmanager
+from http.client import IncompleteRead
+from io import BytesIO, FileIO
 
+# NOTE: this import is not needed per-se, but it's imported here first to point the
+# user to the most important possible missing dependency
+import googleapiclient  # noqa pylint: disable=unused-import
+import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload, MediaIoBaseDownload, MediaUpload
+from googleapiclient.http import (MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload, MediaUpload)
 from oauth2client import GOOGLE_TOKEN_URI
 from oauth2client.client import GoogleCredentials
+
+from ..dates import parse_timestamp
+from ..errors import FileNotFoundFromStorageError, InvalidConfigurationError
+from .base import (KEY_TYPE_OBJECT, KEY_TYPE_PREFIX, BaseTransfer, IterKeyItem, get_total_memory)
 
 try:
     from oauth2client.service_account import ServiceAccountCredentials
@@ -42,20 +45,19 @@ except ImportError:
             service_account_email=credentials["client_email"],
             private_key_id=credentials["private_key_id"],
             private_key_pkcs8_text=credentials["private_key"],
-            scopes=[])
+            scopes=[]
+        )
 
-
-from ..dates import parse_timestamp
-from ..errors import FileNotFoundFromStorageError, InvalidConfigurationError
-from .base import BaseTransfer, KEY_TYPE_PREFIX, KEY_TYPE_OBJECT, IterKeyItem
 
 # Silence Google API client verbose spamming
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 logging.getLogger("googleapiclient").setLevel(logging.WARNING)
 logging.getLogger("oauth2client").setLevel(logging.WARNING)
 
-# googleapiclient download performs some 3-4 times better with 50 MB chunk size than 5 MB chunk size
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024 * 50
+# googleapiclient download performs some 3-4 times better with 50 MB chunk size than 5 MB chunk size;
+# but decrypting/decompressing big chunks needs a lot of memory so use smaller chunks on systems with less
+# than 2 GB RAM
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024 * 5 if get_total_memory() < 2048 else 1024 * 1024 * 50
 UPLOAD_CHUNK_SIZE = 1024 * 1024 * 5
 
 
@@ -74,7 +76,8 @@ def get_credentials(credential_file=None, credentials=None):
             refresh_token=credentials["refresh_token"],
             token_expiry=None,
             token_uri=GOOGLE_TOKEN_URI,
-            user_agent="pghoard")
+            user_agent="pghoard"
+        )
 
     return GoogleCredentials.get_application_default()
 
@@ -99,16 +102,18 @@ class GoogleTransfer(BaseTransfer):
 
     def _init_google_client(self):
         start_time = time.monotonic()
+        delay = 2
         while True:
             try:
                 # sometimes fails: httplib2.ServerNotFoundError: Unable to find the server at www.googleapis.com
                 return build("storage", "v1", credentials=self.google_creds)
             except (httplib2.ServerNotFoundError, socket.timeout):
-                if time.monotonic() - start_time > 40.0:
+                if time.monotonic() - start_time > 600:
                     raise
 
             # retry on DNS issues
-            time.sleep(1.0)
+            time.sleep(delay)
+            delay = delay * 2
 
     @contextmanager
     def _object_client(self, *, not_found=None):
@@ -132,12 +137,12 @@ class GoogleTransfer(BaseTransfer):
             raise
 
     def _retry_on_reset(self, request, action):
-        retries = 5
-        retry_wait = 0.2
+        retries = 60
+        retry_wait = 2
         while True:
             try:
                 return action()
-            except (IncompleteRead, HttpError, ssl.SSLEOFError, socket.timeout, OSError) as ex:
+            except (IncompleteRead, HttpError, ssl.SSLEOFError, socket.timeout, OSError, socket.gaierror) as ex:
                 # Note that socket.timeout and ssl.SSLEOFError inherit from OSError
                 # and the order of handling the errors here needs to be correct
                 if not retries:
@@ -147,15 +152,17 @@ class GoogleTransfer(BaseTransfer):
                 elif isinstance(ex, HttpError):
                     # https://cloud.google.com/storage/docs/json_api/v1/status-codes
                     # https://cloud.google.com/storage/docs/exponential-backoff
-                    if ex.resp["status"] not in ("429", "500", "502", "503"):  # pylint: disable=no-member
+                    if ex.resp["status"] not in ("429", "500", "502", "503", "504"):  # pylint: disable=no-member
                         raise
                     retry_wait = min(10.0, max(1.0, retry_wait * 2) + random.random())
                 # httplib2 commonly fails with Bad File Descriptor and Connection Reset
-                elif isinstance(ex, OSError) and ex.errno not in [errno.EBADF, errno.ECONNRESET]:
+                elif isinstance(ex, OSError) and ex.errno not in [errno.EAGAIN, errno.EBADF, errno.ECONNRESET]:
+                    raise
+                # getaddrinfo sometimes fails with "Name or service not known"
+                elif isinstance(ex, socket.gaierror) and ex.errno != socket.EAI_NONAME:
                     raise
 
-                self.log.warning("%s failed: %s (%s), retrying in %.2fs",
-                                 action, ex.__class__.__name__, ex, retry_wait)
+                self.log.warning("%s failed: %s (%s), retrying in %.2fs", action, ex.__class__.__name__, ex, retry_wait)
 
             # we want to reset the http connection state in case of error
             if request and hasattr(request, "http"):
@@ -202,11 +209,18 @@ class GoogleTransfer(BaseTransfer):
                     yield on_property, items
             request = domain.list_next(request, result)
 
-    def iter_key(self, key, *, with_metadata=True,  # pylint: disable=unused-argument, unused-variable
-                 deep=False, include_key=False):
+    def iter_key(
+        self,
+        key,
+        *,
+        with_metadata=True,  # pylint: disable=unused-argument, unused-variable
+        deep=False,
+        include_key=False
+    ):
         path = self.format_key_for_backend(key, trailing_slash=not include_key)
         self.log.debug("Listing path %r", path)
         with self._object_client() as clob:
+
             def initial_op(domain):
                 if deep:
                     kwargs = {}
@@ -313,23 +327,34 @@ class GoogleTransfer(BaseTransfer):
                 if status:
                     now = time.monotonic()
                     if (now - last_log_output) >= 5.0:
-                        self.log.debug("Upload of %r to %r: %d%%, %s bytes", upload, key, status.progress() * 100,
-                                       status.resumable_progress)
+                        self.log.debug(
+                            "Upload of %r to %r: %d%%, %s bytes", upload, key,
+                            status.progress() * 100, status.resumable_progress
+                        )
                         last_log_output = now
 
                     if upload_progress_fn:
                         upload_progress_fn(status.resumable_progress)
 
-    def store_file_from_memory(self, key, memstring, metadata=None, extra_props=None,  # pylint: disable=arguments-differ
-                               cache_control=None, mimetype=None):
+    # pylint: disable=arguments-differ
+    def store_file_from_memory(self, key, memstring, metadata=None, extra_props=None, cache_control=None, mimetype=None):
         upload = MediaIoBaseUpload(
             BytesIO(memstring), mimetype or "application/octet-stream", chunksize=UPLOAD_CHUNK_SIZE, resumable=True
         )
         return self._upload(upload, key, self.sanitize_metadata(metadata), extra_props, cache_control=cache_control)
 
-    def store_file_from_disk(self, key, filepath, metadata=None,  # pylint: disable=arguments-differ, unused-variable
-                             *, multipart=None, extra_props=None,  # pylint: disable=arguments-differ, unused-variable
-                             cache_control=None, mimetype=None):
+    # pylint: disable=arguments-differ
+    def store_file_from_disk(
+        self,
+        key,
+        filepath,
+        metadata=None,  # pylint: disable=arguments-differ, unused-variable
+        *,
+        multipart=None,
+        extra_props=None,  # pylint: disable=arguments-differ, unused-variable
+        cache_control=None,
+        mimetype=None
+    ):
         mimetype = mimetype or "application/octet-stream"
         upload = MediaFileUpload(filepath, mimetype, chunksize=UPLOAD_CHUNK_SIZE, resumable=True)
         return self._upload(upload, key, self.sanitize_metadata(metadata), extra_props, cache_control=cache_control)
@@ -392,7 +417,6 @@ class GoogleTransfer(BaseTransfer):
 
 class MediaStreamUpload(MediaUpload):
     """Support streaming arbitrary amount of data from non-seekable object supporting read method."""
-
     def __init__(self, fd, *, chunk_size, mime_type, name):
         self._data = b""
         self._chunk_size = chunk_size
@@ -413,8 +437,8 @@ class MediaStreamUpload(MediaUpload):
     def resumable(self):
         return True
 
-    def getbytes(self, begin, end):
-        length = end
+    # second parameter is length but baseclass incorrectly names it end
+    def getbytes(self, begin, length):  # pylint: disable=arguments-differ
         if begin < (self._position or 0):
             msg = "Requested position {} for {!r} preceeds already fulfilled position {}".format(
                 begin, self._name, self._position
@@ -428,8 +452,8 @@ class MediaStreamUpload(MediaUpload):
 
         if self._position is None or begin == self._position + len(self._data):
             self._data = self._read_bytes(length)
-        elif begin != self._position:
-            retain_chunk = self._data[begin - self._position]
+        elif begin != self._position or length > len(self._data):
+            retain_chunk = self._data[begin - self._position:]
             self._data = self._read_bytes(length - len(retain_chunk), initial_data=retain_chunk)
 
         self._position = begin

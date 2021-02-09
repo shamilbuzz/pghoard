@@ -1,13 +1,14 @@
-from pghoard.common import get_object_storage_config
-from pghoard.config import key_lookup_for_site
-from pghoard.rohmu import get_transfer
-from pghoard.rohmu.rohmufile import create_sink_pipeline
 import multiprocessing
 import os
 import queue
 import signal
-import time
 import threading
+import time
+
+from pghoard.common import get_object_storage_config
+from pghoard.config import key_lookup_for_site
+from pghoard.rohmu import get_transfer
+from pghoard.rohmu.rohmufile import create_sink_pipeline
 
 
 class FileFetchManager:
@@ -15,7 +16,6 @@ class FileFetchManager:
     object storage. If a multiprocess.Manager instance is provided, the fetch is performed
     in a subprocess to avoid GIL related performance constraints, otherwise file is fetched
     in current process."""
-
     def __init__(self, app_config, mp_manager, transfer_provider):
         self.config = app_config
         self.last_activity = time.monotonic()
@@ -69,8 +69,9 @@ class FileFetchManager:
                 return
             self.result_queue = self.mp_manager.Queue()
             self.task_queue = self.mp_manager.Queue()
-            self.process = multiprocessing.Process(target=_remote_file_fetch_loop,
-                                                   args=(self.config, self.task_queue, self.result_queue))
+            self.process = multiprocessing.Process(
+                target=_remote_file_fetch_loop, args=(self.config, self.task_queue, self.result_queue)
+            )
             self.process.start()
 
 
@@ -89,7 +90,8 @@ class FileFetcher:
             file_size = len(data)
             with open(target_path, "wb") as target_file:
                 output = create_sink_pipeline(
-                    output=target_file, file_size=file_size, metadata=metadata, key_lookup=lookup, throttle_time=0)
+                    output=target_file, file_size=file_size, metadata=metadata, key_lookup=lookup, throttle_time=0
+                )
                 output.write(data)
             return file_size, metadata
         except Exception:
