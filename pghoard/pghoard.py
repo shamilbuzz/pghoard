@@ -132,6 +132,8 @@ class PGHoard:
                 "Server version: %r does not match %s version: %r", pg_version_server, self.config[command + "_path"],
                 pg_version_client
             )
+            print("PG Server Version: ", pg_version_server)
+            print('PG Client Version ', pg_version_client)
             create_alert_file(self.config, "version_mismatch_error")
             return False
         return True
@@ -283,9 +285,9 @@ class PGHoard:
         if metadata.get("format") == "pghoard-bb-v2":
             bmeta_compressed = storage.get_contents_to_string(main_backup_key)[0]
             with rohmufile.file_reader(
-                fileobj=io.BytesIO(bmeta_compressed),
-                metadata=metadata,
-                key_lookup=config.key_lookup_for_site(self.config, site)
+                    fileobj=io.BytesIO(bmeta_compressed),
+                    metadata=metadata,
+                    key_lookup=config.key_lookup_for_site(self.config, site)
             ) as input_obj:
                 bmeta = extract_pghoard_bb_v2_metadata(input_obj)
                 self.log.debug("PGHoard chunk metadata: %r", bmeta)
